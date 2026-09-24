@@ -193,6 +193,29 @@ class PageGroup(BaseModel):
             return
         return page_items.get_item(item_type=item_type, key=key)
 
+    def update_data_all(
+        self: PageGroup,
+        session_data: Dict[str, Any],
+    ) -> None:
+        # Push session data to every page in the group, not just the
+        # active one. Each page's widgets already filter out parameters
+        # they don't own (see Page.update_session_data / Widget.has), and
+        # the renderer only actually pushes to the browser for the page
+        # that is currently shown (route == self._last_shown). This keeps
+        # inactive pages (e.g. the player page while the busy page is
+        # focused) up to date internally, so they show correct data the
+        # moment they gain focus, instead of stale data from the previous
+        # time they were active.
+        for page_items in self._pages.values():
+            page_items.update_data(session_data=session_data)
+
+    def update_state_all(
+        self: PageGroup,
+        ovos_event: str,
+    ) -> None:
+        for page_items in self._pages.values():
+            page_items.update_state(ovos_event=ovos_event)
+
     def update_data(
         self: PageGroup,
         page_id: str,
