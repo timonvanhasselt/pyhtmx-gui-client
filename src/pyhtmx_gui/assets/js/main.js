@@ -186,3 +186,665 @@ function stringify_event(e) {
         return v;
     }, ' ');
 }
+
+// ============================================================
+// Smooth media-player clock
+// ============================================================
+//
+// OCP sends the real playback position approximately every 2 seconds.
+//
+// IMPORTANT:
+// Position SSE messages are intercepted BEFORE HTMX performs its normal
+// DOM swap. Otherwise HTMX would write the server position (e.g. 24)
+// directly into the time label every 2 seconds, causing visible jumps.
+//
+// OCP remains the source of truth.
+// The browser interpolates between OCP position updates.
+//
+// Flow:
+//
+//   OCP position
+//        ↓
+//   htmx:sseBeforeMessage
+//        ↓
+//   preventDefault()
+//        ↓
+//   synchronize local clock
+//        ↓
+//   local clock updates time + progress
+//
+// Other SSE events (uri, duration, status, etc.) continue normally.
+//
+
+
+const media_player_clock = {
+    position: 0,
+    duration: 0,
+    playing: false,
+
+    last_tick: null,
+    last_displayed_second: -1,
+
+    // Used to recognise the same track after an HTMX root swap.
+    track_key: null,
+
+    initialized: false,
+};
+
+
+// ------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------
+
+function format_media_time(seconds) {
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+        return "00:00";
+    }
+
+    seconds = Math.floor(seconds);
+
+    const minutes = Math.floor(seconds / 60);
+    const sec = seconds % 60;
+
+    return `${String(minutes).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
+
+
+function parse_media_time(value) {
+    if (value == null) {
+        return null;
+    }
+
+    const text = String(value).trim();
+
+    // MM:SS
+    const time_match = text.match(/^(\d+):(\d{2})$/);
+
+    if (time_match != null) {
+        return (
+            parseInt(time_match[1], 10) * 60 +
+            parseInt(time_match[2], 10)
+        );
+    }
+
+    // Numeric value, interpreted as seconds.
+    const number = Number(text);
+
+    if (Number.isFinite(number)) {
+        return number;
+    }
+
+    return null;
+}
+
+
+// ------------------------------------------------------------
+// Track identity
+// ------------------------------------------------------------
+
+function media_player_get_track_key() {
+    const title = document.getElementById("track-title");
+    const artist = document.getElementById("track-artist");
+    const image = document.getElementById("track-image");
+
+    const title_text =
+        title != null ? title.textContent.trim() : "";
+
+    const artist_text =
+        artist != null ? artist.textContent.trim() : "";
+
+    const image_src =
+        image != null
+            ? image.getAttribute("src") || ""
+            : "";
+
+    if (
+        title_text === "" &&
+        artist_text === "" &&
+        image_src === ""
+    ) {
+        return null;
+    }
+
+    return `${title_text}|${artist_text}|${image_src}`;
+}
+
+
+// ------------------------------------------------------------
+// Playback state
+// ------------------------------------------------------------
+
+function media_player_is_playing() {
+    const toggle_icon =
+        document.getElementById("toggle-icon");
+
+    if (toggle_icon == null) {
+        return media_player_clock.playing;
+    }
+
+    return toggle_icon.textContent.trim() === "⏸";
+}
+
+
+function media_player_read_duration() {
+    const total_label =
+        document.getElementById("total-time-label");
+
+    if (total_label == null) {
+        return;
+    }
+
+    const duration =
+        parse_media_time(total_label.textContent);
+
+    if (duration != null && duration > 0) {
+        media_player_clock.duration = duration;
+    }
+}
+
+
+// ------------------------------------------------------------
+// DOM updates
+// ------------------------------------------------------------
+
+function media_player_update_display() {
+    const current_label =
+        document.getElementById("current-time-label");
+
+    if (current_label == null) {
+        return;
+    }
+
+    // Time label
+    const displayed_second = Math.floor(
+        Math.max(0, media_player_clock.position)
+    );
+
+    if (
+        displayed_second !==
+        media_player_clock.last_displayed_second
+    ) {
+        current_label.textContent =
+            format_media_time(media_player_clock.position);
+
+        media_player_clock.last_displayed_second =
+            displayed_second;
+    }
+
+    // Progress bar
+    const progress_fill =
+        document.getElementById("progress-fill");
+
+    if (
+        progress_fill != null &&
+        Number.isFinite(media_player_clock.duration) &&
+        media_player_clock.duration > 0
+    ) {
+        const percentage = Math.min(
+            100,
+            Math.max(
+                0,
+                (
+                    media_player_clock.position /
+                    media_player_clock.duration
+                ) * 100
+            )
+        );
+
+        progress_fill.style.width =
+            `${percentage.toFixed(2)}%`;
+    }
+}
+
+
+// ------------------------------------------------------------
+// OCP synchronisation
+// ------------------------------------------------------------
+
+function media_player_sync_position(position) {
+    if (!Number.isFinite(position)) {
+        return;
+    }
+
+    const now = performance.now();
+
+    media_player_clock.position =
+        Math.max(0, position);
+
+    media_player_clock.last_tick = now;
+
+    media_player_clock.last_displayed_second =
+        Math.floor(media_player_clock.position);
+
+    media_player_clock.playing =
+        media_player_is_playing();
+
+    media_player_clock.initialized = true;
+
+    media_player_read_duration();
+
+    console.log(
+        `[MEDIA CLOCK] OCP sync position=${position.toFixed(3)}`
+    );
+
+    media_player_update_display();
+}
+
+
+// ------------------------------------------------------------
+// New track
+// ------------------------------------------------------------
+
+function media_player_reset() {
+    const now = performance.now();
+
+    media_player_clock.position = 0;
+    media_player_clock.last_tick = now;
+    media_player_clock.last_displayed_second = 0;
+
+    media_player_clock.last_tick = now;
+    media_player_clock.playing =
+        media_player_is_playing();
+
+    media_player_clock.initialized = true;
+
+    console.log(
+        "[MEDIA CLOCK] New track -> reset"
+    );
+
+    media_player_update_display();
+}
+
+
+// ------------------------------------------------------------
+// INTERCEPT POSITION SSE BEFORE HTMX SWAP
+// ------------------------------------------------------------
+//
+// This is the important part.
+//
+// The SSE extension does:
+//
+//   htmx:sseBeforeMessage
+//        ↓
+//   swap()
+//        ↓
+//   htmx:sseMessage
+//
+// We stop position events before swap().
+// This prevents:
+//
+//   16 → 18 → 20 → 22
+//
+// from being written directly into the DOM.
+//
+// The local clock handles the display instead.
+//
+
+function media_player_handle_sse_before(event) {
+    const sse_event = event.detail;
+
+    if (sse_event == null) {
+        return;
+    }
+
+    const event_type = sse_event.type || "";
+
+    if (!event_type.startsWith("position-")) {
+        return;
+    }
+
+    const target = event.target;
+
+    if (target == null) {
+        return;
+    }
+
+    const target_id = target.id || "";
+
+    // Prevent HTMX from performing the normal SSE DOM swap
+    // for both position targets.
+    event.preventDefault();
+
+    // Only use one of the two position targets as the
+    // synchronization trigger. Otherwise the same OCP position
+    // would be processed twice.
+    if (target_id !== "current-time-label") {
+        return;
+    }
+
+    const position =
+        parse_media_time(sse_event.data);
+
+    if (position != null) {
+        media_player_sync_position(position);
+    }
+}
+
+
+// ------------------------------------------------------------
+// Handle normal SSE messages after the swap
+// ------------------------------------------------------------
+//
+// Position is deliberately NOT handled here anymore.
+// It was intercepted in htmx:sseBeforeMessage.
+//
+
+function media_player_handle_sse_message(event) {
+    const sse_event = event.detail;
+
+    if (sse_event == null) {
+        return;
+    }
+
+    const event_type = sse_event.type || "";
+
+    const target = event.target;
+
+    if (target == null) {
+        return;
+    }
+
+    const target_id = target.id || "";
+
+
+    // --------------------------------------------------------
+    // New track
+    // --------------------------------------------------------
+
+    if (
+        target_id === "current-time-label" &&
+        event_type.startsWith("uri-")
+    ) {
+        media_player_reset();
+        return;
+    }
+
+
+    // --------------------------------------------------------
+    // Duration
+    // --------------------------------------------------------
+
+    if (
+        target_id === "total-time-label" &&
+        event_type.startsWith("duration-")
+    ) {
+        const duration =
+            parse_media_time(sse_event.data);
+
+        if (
+            duration != null &&
+            duration > 0
+        ) {
+            media_player_clock.duration = duration;
+
+            console.log(
+                `[MEDIA CLOCK] Duration=${duration.toFixed(3)}`
+            );
+
+            media_player_update_display();
+        }
+
+        return;
+    }
+
+
+    // --------------------------------------------------------
+    // Playback status
+    // --------------------------------------------------------
+
+    if (
+        target_id === "toggle-icon" &&
+        event_type.startsWith("status-")
+    ) {
+        media_player_clock.playing =
+            media_player_is_playing();
+
+        media_player_clock.last_tick =
+            performance.now();
+
+        console.log(
+            `[MEDIA CLOCK] Playing=${media_player_clock.playing}`
+        );
+
+        return;
+    }
+}
+
+
+// ------------------------------------------------------------
+// Local playback clock
+// ------------------------------------------------------------
+
+function media_player_tick() {
+    const current_label =
+        document.getElementById("current-time-label");
+
+    // Player is not visible.
+    //
+    // IMPORTANT:
+    // Do not reset position here. Another HTMX page may simply
+    // be displayed temporarily.
+    if (current_label == null) {
+        media_player_clock.last_tick = null;
+        return;
+    }
+
+    const now = performance.now();
+
+    if (media_player_clock.last_tick == null) {
+        media_player_clock.last_tick = now;
+        return;
+    }
+
+    const elapsed =
+        (now - media_player_clock.last_tick) / 1000;
+
+    media_player_clock.last_tick = now;
+
+    media_player_clock.playing =
+        media_player_is_playing();
+
+    if (media_player_clock.playing) {
+        media_player_clock.position += elapsed;
+    }
+
+    // Don't exceed known duration.
+    if (
+        media_player_clock.duration > 0 &&
+        media_player_clock.position >=
+            media_player_clock.duration
+    ) {
+        media_player_clock.position =
+            media_player_clock.duration;
+    }
+
+    media_player_update_display();
+}
+
+
+// ------------------------------------------------------------
+// HTMX page/load handling
+// ------------------------------------------------------------
+
+htmx.on(
+    "htmx:load",
+    function(event) {
+        const current_label =
+            document.getElementById(
+                "current-time-label"
+            );
+
+        if (current_label == null) {
+            return;
+        }
+
+        media_player_read_duration();
+
+        const current_track_key =
+            media_player_get_track_key();
+
+
+        // First player load.
+        if (!media_player_clock.initialized) {
+            const position =
+                parse_media_time(
+                    current_label.textContent
+                );
+
+            if (position != null) {
+                media_player_clock.position =
+                    position;
+            }
+
+            media_player_clock.last_tick =
+                performance.now();
+
+            media_player_clock.last_displayed_second =
+                Math.floor(
+                    media_player_clock.position
+                );
+
+            media_player_clock.playing =
+                media_player_is_playing();
+
+            media_player_clock.track_key =
+                current_track_key;
+
+            media_player_clock.initialized =
+                true;
+
+            console.log(
+                `[MEDIA CLOCK] Initial position=${media_player_clock.position.toFixed(3)}`
+            );
+
+            return;
+        }
+
+
+        // Same track, new DOM.
+        //
+        // This commonly happens after a root SSE swap.
+        // Keep the interpolated local position.
+        if (
+            current_track_key != null &&
+            current_track_key ===
+                media_player_clock.track_key
+        ) {
+            media_player_clock.last_tick =
+                performance.now();
+
+            media_player_clock.playing =
+                media_player_is_playing();
+
+            console.log(
+                "[MEDIA CLOCK] Same track after HTMX swap -> preserving clock"
+            );
+
+            return;
+        }
+
+
+        // Different track.
+        if (
+            current_track_key != null &&
+            current_track_key !==
+                media_player_clock.track_key
+        ) {
+            const position =
+                parse_media_time(
+                    current_label.textContent
+                );
+
+            if (position != null) {
+                media_player_clock.position =
+                    position;
+            }
+
+            media_player_clock.track_key =
+                current_track_key;
+
+            media_player_clock.last_tick =
+                performance.now();
+
+            media_player_clock.last_displayed_second =
+                Math.floor(
+                    media_player_clock.position
+                );
+
+            media_player_clock.playing =
+                media_player_is_playing();
+
+            console.log(
+                `[MEDIA CLOCK] Track changed -> position=${media_player_clock.position.toFixed(3)}`
+            );
+        }
+    }
+);
+
+
+// ------------------------------------------------------------
+// Initialise
+// ------------------------------------------------------------
+
+dom_ready(() => {
+    // Position events must be intercepted BEFORE the SSE extension
+    // performs its normal DOM swap.
+    document.body.addEventListener(
+        "htmx:sseBeforeMessage",
+        media_player_handle_sse_before,
+    );
+
+    // Normal SSE messages continue through the normal swap path.
+    document.body.addEventListener(
+        "htmx:sseMessage",
+        media_player_handle_sse_message,
+    );
+
+
+    media_player_read_duration();
+
+    const current_label =
+        document.getElementById(
+            "current-time-label"
+        );
+
+    if (current_label != null) {
+        const position =
+            parse_media_time(
+                current_label.textContent
+            );
+
+        if (position != null) {
+            media_player_clock.position =
+                position;
+        }
+
+        media_player_clock.last_tick =
+            performance.now();
+
+        media_player_clock.last_displayed_second =
+            Math.floor(
+                media_player_clock.position
+            );
+
+        media_player_clock.playing =
+            media_player_is_playing();
+
+        media_player_clock.track_key =
+            media_player_get_track_key();
+
+        media_player_clock.initialized =
+            true;
+    }
+
+
+    // Run the local player clock at 10 Hz.
+    //
+    // The label changes once per second.
+    // The progress bar is updated continuously.
+    window.setInterval(
+        media_player_tick,
+        100,
+    );
+});
+
