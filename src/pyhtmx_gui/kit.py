@@ -67,8 +67,8 @@ class Widget:
     ):
         self._type: WidgetType = type
         self._name: str = name or f"widget-{token_hex(4)}"
-        self._session_data: Dict[str, Any] = (
-            dict.fromkeys(self._parameters, '')
+        self._session_data: Dict[str, Any] = dict.fromkeys(
+            self._parameters, ''
         )
         self._session_items: Dict[str, List[SessionItem]] = {}
         self._triggers: Dict[str, List[Trigger]] = {}
@@ -136,7 +136,10 @@ class Widget:
                 target_level = []
                 if value.target_level:
                     target_level = list(
-                        filter(lambda e: "outerHTML" not in e, value.target_level.split())
+                        filter(
+                            lambda e: "outerHTML" not in e,
+                            value.target_level.split()
+                        )
                     )
                     if "innerHTML" not in value.target_level:
                         target_level.insert(0, "innerHTML")
@@ -146,7 +149,10 @@ class Widget:
                 target_level = []
                 if value.target_level:
                     target_level = list(
-                        filter(lambda e: "innerHTML" not in e, value.target_level.split())
+                        filter(
+                            lambda e: "innerHTML" not in e,
+                            value.target_level.split()
+                        )
                     )
                     if "outerHTML" not in value.target_level:
                         target_level.insert(0, "outerHTML")
@@ -179,7 +185,10 @@ class Widget:
                 target_level = []
                 if value.target_level:
                     target_level = list(
-                        filter(lambda e: "outerHTML" not in e, value.target_level.split())
+                        filter(
+                            lambda e: "outerHTML" not in e,
+                            value.target_level.split()
+                        )
                     )
                     if "innerHTML" not in value.target_level:
                         target_level.insert(0, "innerHTML")
@@ -189,7 +198,10 @@ class Widget:
                 target_level = []
                 if value.target_level:
                     target_level = list(
-                        filter(lambda e: "innerHTML" not in e, value.target_level.split())
+                        filter(
+                            lambda e: "innerHTML" not in e,
+                            value.target_level.split()
+                        )
                     )
                     if "outerHTML" not in value.target_level:
                         target_level.insert(0, "outerHTML")
@@ -202,7 +214,7 @@ class Widget:
                 # Create a ghost element
                 ghost_source: HTMLTag = HTMLTag(
                     "div",
-                    _style={"display: none"},
+                    _style={"display": "none"},
                 )
                 self._ghost_elements.append(ghost_source)
                 value.source = ghost_source
@@ -313,12 +325,15 @@ class Page(Widget):
                                 if attr_name in formatters else value  # type: ignore
                             )
                             attributes[attr_name] = attr_value
-                        # Update
+                        # Update only the concrete SessionItem target.
+                        # This is important when one session parameter, such as
+                        # "position", drives multiple DOM elements.
                         renderer.update_attributes(
                             namespace=self.namespace,
                             page_id=self.page_id,
                             parameter=session_item.parameter,
                             attribute=attributes,
+                            target=session_item.component,
                         )
 
     def update_trigger_state(
@@ -338,12 +353,13 @@ class Page(Widget):
                         if attr_name in getters:  # type: ignore
                             attr_value = getters[attr_name](ovos_event)  # type: ignore
                             attributes[attr_name] = attr_value
-                    # Update
+                    # Update only the concrete Trigger target.
                     renderer.update_attributes(
                         namespace=self.namespace,
                         page_id=self.page_id,
                         parameter=trigger.event,
                         attribute=attributes,
+                        target=trigger.component,
                     )
 
     def include_ghost_elements(
