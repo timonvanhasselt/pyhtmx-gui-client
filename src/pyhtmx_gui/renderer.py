@@ -98,6 +98,7 @@ class Renderer:
         page_id: Optional[str],
         parameter: str,
         attribute: Dict[str, Any],
+        target: Optional[Any] = None,
     ) -> None:
         page_manager: Optional[PageManager] = self.get_special_manager(
             namespace,  # type: ignore
@@ -123,6 +124,14 @@ class Renderer:
             return
 
         for interaction_parameter in parameter_list:
+            # A parameter can have multiple SessionItems/targets. Only update
+            # the concrete target that originated this update.
+            if (
+                target is not None
+                and interaction_parameter.target is not target
+            ):
+                continue
+
             parameter_id = interaction_parameter.parameter_id
             component = interaction_parameter.target
             attributes = dict(attribute)
@@ -148,6 +157,7 @@ class Renderer:
         page_id: Optional[str],
         parameter: str,
         attribute: Dict[str, Any],
+        target: Optional[Any] = None,
     ) -> None:
         # If namespace was not provided, use active namespace
         active_namespace = self._gui_manager.get_active_namespace()  # type: ignore
@@ -159,6 +169,7 @@ class Renderer:
                 page_id,
                 parameter,
                 attribute,
+                target=target,
             )
             return
 
@@ -195,6 +206,16 @@ class Renderer:
 
         route: Tuple[str, str] = (namespace, page_id)  # type: ignore
         for interaction_parameter in parameter_list:
+            # A parameter can be registered for multiple DOM targets. When
+            # Page.update_session_data() supplies a concrete target, restrict
+            # this update to that exact SessionItem target. Without this filter,
+            # e.g. "position" updates both the progress bar and time label.
+            if (
+                target is not None
+                and interaction_parameter.target is not target
+            ):
+                continue
+
             parameter_id = interaction_parameter.parameter_id
             component = interaction_parameter.target
             attributes = dict(attribute)
@@ -236,12 +257,14 @@ class Renderer:
                 "No namespace active. Dialog will not open."
             )
             return
+
         page_id = self._gui_manager.get_active_page_id()  # type: ignore
         if not page_id:
             logger.info(
                 "No page active. Dialog will not open."
             )
             return
+
         # Retrieve dialog content
         dialog_content = self._gui_manager.get_item(  # type: ignore
             namespace=namespace,
@@ -309,7 +332,6 @@ class Renderer:
         self: Renderer,
         neighbor: PageNeighbor,
     ) -> None:
-        # Get active namespace and page id
         namespace = self._gui_manager.get_active_namespace()  # type: ignore
         if not namespace:
             logger.info(
@@ -317,6 +339,7 @@ class Renderer:
                 f"{neighbor.title()} page will not be shown."
             )
             return
+
         page_index = self._gui_manager.get_active_page_index()  # type: ignore
         if page_index is None:
             logger.info(
@@ -324,6 +347,7 @@ class Renderer:
                 f"{neighbor.title()} page will not be shown."
             )
             return
+
         num_pages = self._gui_manager.get_num_pages()  # type: ignore
         if num_pages == 1:
             logger.info(
@@ -331,19 +355,23 @@ class Renderer:
                 f"{neighbor.title()} page will not be shown."
             )
             return
+
         # Get neighboring page index
         offset: int = 1 if neighbor == PageNeighbor.NEXT else -1
         n_page_index: int = (page_index + offset) % num_pages
         page_id = self._gui_manager.get_active_page_id()  # type: ignore
+
         # Activate neighboring page
         self._gui_manager.activate_page(namespace, n_page_index)  # type: ignore
         n_page_id = self._gui_manager.get_active_page_id()  # type: ignore
+
         # Confirm deactivation of previous page
         if n_page_id != page_id:
             logger.info(
                 f"Page deactivated: {namespace}::{page_id}"
             )
             page_id = n_page_id
+
         # Queue for displaying
         self._queue.put((namespace, page_id))
         logger.info(
@@ -453,47 +481,52 @@ class Renderer:
         )
 
     def update_root(self: Renderer) -> None:
-        namespace, page_id = route = self._queue.get()
-        if route == self._last_shown:
-            logger.warning(
-                f"Display already showing '{namespace}::{page_id}'. "
-                "Update not required."
-            )
-            return
-        # Update
-        self._last_shown = route
-        page_tag = self._gui_manager.get_active_page_tag(namespace)  # type: ignore
-        self._root.text = None
-        _ = self._root.detach_children()
-        self._root.add_child(page_tag)
-        self.send(page_tag.to_string(), event_id="root")
+        with self._lock:
+            namespace, page_id = route = self._queue.get()
+            if route == self._last_shown:
+                logger.warning(
+                    f"Display already showing '{namespace}::{page_id}'. "
+                    "Update not required."
+                )
+                return
+
+            # Update
+            self._last_shown = route
+            page_tag = self._gui_manager.get_active_page_tag(namespace)  # type: ignore
+            self._root.text = None
+            _ = self._root.detach_children()
+            self._root.add_child(page_tag)
+            self.send(page_tag.to_string(), event_id="root")
 
     def update_neighbor(self: Renderer, neighbor: PageNeighbor) -> None:
-        namespace, page_id = route = self._queue.get()
-        if route == self._last_shown:
-            logger.warning(
-                f"Display already showing '{namespace}::{page_id}'. "
-                "Update not required."
+        with self._lock:
+            namespace, page_id = route = self._queue.get()
+            if route == self._last_shown:
+                logger.warning(
+                    f"Display already showing '{namespace}::{page_id}'. "
+                    "Update not required."
+                )
+                return
+
+            # Update
+            self._last_shown = route
+            page_tag = self._gui_manager.get_active_page_tag(namespace)  # type: ignore
+            self._root.text = None
+            _ = self._root.detach_children()
+            self._root.add_child(page_tag)
+
+            # Set animation
+            animation: str = (
+                "swipe-in-from-right"
+                if neighbor == PageNeighbor.NEXT else
+                "swipe-in-from-left"
             )
-            return
-        # Update
-        self._last_shown = route
-        page_tag = self._gui_manager.get_active_page_tag(namespace)  # type: ignore
-        self._root.text = None
-        _ = self._root.detach_children()
-        self._root.add_child(page_tag)
-        # Set animation
-        animation: str = (
-            "swipe-in-from-right"
-            if neighbor == PageNeighbor.NEXT else
-            "swipe-in-from-left"
-        )
-        page_copy = deepcopy(page_tag)
-        page_copy.update_attributes(
-            attributes={"class": animation},
-            incremental=True,
-        )
-        self.send(page_copy.to_string(), event_id="root")
+            page_copy = deepcopy(page_tag)
+            page_copy.update_attributes(
+                attributes={"class": animation},
+                incremental=True,
+            )
+            self.send(page_copy.to_string(), event_id="root")
 
     def send(
         self: Renderer,
@@ -503,9 +536,15 @@ class Renderer:
         # Don't send message without clients or data
         if not self._clients or data is None:
             return
-        # Format SSE message
-        data = data.replace('\n', '')
-        msg: str = f"data: {data}\n\n"
+
+        # Format SSE message: per the SSE spec, a multi-line "data" field
+        # must repeat the "data:" prefix on every line. Previously all
+        # newlines were stripped, which collapsed the entire payload
+        # (including any inline <script> content) onto a single line and
+        # could corrupt embedded JS (e.g. a "//" line comment would then
+        # swallow everything after it, including closing tags).
+        lines = data.split('\n')
+        msg: str = "\n".join(f"data: {line}" for line in lines) + "\n\n"
         if event_id is not None:
             msg = f"event: {event_id}\n{msg}"
         self.event_sender.send(msg)
@@ -532,6 +571,7 @@ class Renderer:
             ovos_event=EventType.UTTERANCE,
             data={"utterance": utterance},
         )
+
 
 # Instantiate global renderer
 global_renderer: Renderer = Renderer()
