@@ -32,19 +32,30 @@ class PageRegistrationInterface:
         # Set new id
         _id: str = token_hex(4)
         parameter_id = f"{parameter}-{_id}"
+
+        # Preserve existing SSE swap event ids on this target.
+        # Multiple SessionItems can target the same DOM element.
+        existing_sse = target.attributes.get("sse-swap", "")
+        sse_events = ",".join(
+            filter(bool, (existing_sse, parameter_id))
+        )
+
         attributes: Dict[str, str] = {
-            "sse-swap": parameter_id,
+            "sse-swap": sse_events,
             "hx-swap": target_level,  # type: ignore
         }
+
         target.update_attributes(
             attributes=attributes,
         )
+
         # Instantiate interaction parameter
         interaction_parameter: InteractionParameter = InteractionParameter(
             parameter_name=parameter,
             parameter_id=parameter_id,
             target=target,
         )
+
         # Register parameter
         cls.set_item(
             item_type=PageItem.PARAMETER,
