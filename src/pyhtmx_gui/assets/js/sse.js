@@ -324,12 +324,21 @@ This extension adds support for Server Sent Events to htmx.  See /www/extensions
       const innerDoSwap = doSwap
       doSwap = function() {
         // @ts-ignore experimental feature atm
-        document.startViewTransition(() => innerDoSwap())
+        try {
+          document.startViewTransition(() => innerDoSwap())
+        } catch (err) {
+          // startViewTransition() throws InvalidStateError synchronously if
+          // a transition is already in progress (e.g. two "root" swaps in
+          // quick succession). Without this fallback the swap is silently
+          // dropped and the old page content stays on screen forever.
+          console.warn('View transition failed, falling back to direct swap:', err)
+          innerDoSwap()
+        }
       }
     }
 
     if (swapSpec.swapDelay > 0) {
-      getWindow().setTimeout(doSwap, swapSpec.swapDelay)
+      window.setTimeout(doSwap, swapSpec.swapDelay)
     } else {
       doSwap()
     }
